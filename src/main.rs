@@ -292,7 +292,6 @@ async fn connect_to_server(clipboard: ClipboardManager, network: NetworkManager,
             _ = tokio::signal::ctrl_c() => {
                 break;
             }
-            _ = tokio::time::sleep(Duration::from_millis(10)) => {}
         }
     }
     

@@ -159,18 +159,40 @@ impl NetworkManager {
                         
                         // 为每个连接创建一个处理任务
                         tokio::spawn(async move {
-                            // 重新获取stream（从连接池中）
-                            let mut stream = {
-                                let mut conns = connections.lock().await;
-                                conns.remove(&device_id).unwrap() // 安全移除，因为我们刚刚插入了它
-                            };
-                            
-                            if let Err(e) = Self::handle_tcp_connection(&mut stream, message_sender, device_name).await {
-                                eprintln!("❌ 处理TCP连接失败: {}", e);
+                            // 在这个任务中，我们保持连接在连接池中，同时处理消息
+                            loop {
+                                // 检查连接是否仍然存在
+                                let has_connection = {
+                                    let conns = connections.lock().await;
+                                    conns.contains_key(&device_id)
+                                };
+                                
+                                if !has_connection {
+                                    break;
+                                }
+                                
+                                // 尝试读取消息
+                                let read_result = {
+                                    let mut conns = connections.lock().await;
+                                    if let Some(stream) = conns.get_mut(&device_id) {
+                                        Self::read_message(stream, message_sender.clone(), device_name.clone()).await
+                                    } else {
+                                        break;
+                                    }
+                                };
+                                
+                                // 如果读取失败，可能是连接断开
+                                if let Err(e) = read_result {
+                                    eprintln!("❌ 读取消息失败: {}", e);
+                                    // 从连接池中移除连接
+                                    connections.lock().await.remove(&device_id);
+                                    break;
+                                }
+                                
+                                // 短暂休眠以避免忙等待
+                                tokio::time::sleep(Duration::from_millis(10)).await;
                             }
                             
-                            // 连接处理完成后，从连接池中移除
-                            connections.lock().await.remove(&device_id);
                             println!("📤 断开与 {} 的连接", device_id);
                         });
                     }
@@ -185,52 +207,46 @@ impl NetworkManager {
         Ok(())
     }
 
-    /// 处理TCP连接
-    async fn handle_tcp_connection(
+    /// 从连接中读取消息
+    async fn read_message(
         stream: &mut TokioTcpStream,
         message_sender: Arc<Mutex<Option<mpsc::UnboundedSender<ClipboardMessage>>>>,
-        _device_name: String,
+        device_name: String,
     ) -> Result<()> {
-        let mut buffer = vec![0u8; MESSAGE_MAX_SIZE];
-        
-        loop {
-            // 首先读取消息长度（4字节）
-            let mut len_buf = [0u8; 4];
-            match stream.read_exact(&mut len_buf).await {
-                Ok(_) => {},
-                Err(_) => break, // 连接断开
-            }
-            
-            let message_len = u32::from_be_bytes(len_buf) as usize;
-            if message_len > MESSAGE_MAX_SIZE {
-                eprintln!("❌ 消息过大: {} bytes", message_len);
-                break;
-            }
-            
-            // 读取消息内容
-            buffer.resize(message_len, 0);
-            stream.read_exact(&mut buffer).await?;
-            
-            match ClipboardMessage::from_bytes(&buffer) {
-                Ok(message) => {
-                    println!("📨 收到消息: {} (来自: {})", 
-                             message.content.preview(50), 
-                             message.sender_name);
-                    
-                    // 转发消息给处理器
-                    if let Some(sender) = message_sender.lock().await.as_ref() {
-                        if let Err(e) = sender.send(message) {
-                            eprintln!("❌ 转发消息失败: {}", e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    eprintln!("❌ 解析消息失败: {}", e);
-                }
-            }
+        // 读取消息长度（4字节）
+        let mut len_buf = [0u8; 4];
+        match stream.read_exact(&mut len_buf).await {
+            Ok(_) => {},
+            Err(_) => return Err(anyhow::anyhow!("连接断开")), // 连接断开
         }
         
-        Ok(())
+        let message_len = u32::from_be_bytes(len_buf) as usize;
+        if message_len > MESSAGE_MAX_SIZE {
+            return Err(anyhow::anyhow!("消息过大: {} bytes", message_len));
+        }
+        
+        // 读取消息内容
+        let mut buffer = vec![0u8; message_len];
+        stream.read_exact(&mut buffer).await?;
+        
+        match ClipboardMessage::from_bytes(&buffer) {
+            Ok(message) => {
+                println!("📨 收到消息: {} (来自: {})", 
+                         message.content.preview(50), 
+                         message.sender_name);
+                
+                // 转发消息给处理器
+                if let Some(sender) = message_sender.lock().await.as_ref() {
+                    if let Err(e) = sender.send(message) {
+                        eprintln!("❌ 转发消息失败: {}", e);
+                    }
+                }
+                Ok(())
+            }
+            Err(e) => {
+                Err(anyhow::anyhow!("解析消息失败: {}", e))
+            }
+        }
     }
 
     /// 连接到指定设备
@@ -249,6 +265,49 @@ impl NetworkManager {
                 
                 // 保存连接
                 self.connections.lock().await.insert(device_id.clone(), stream);
+                
+                // 启动消息接收任务
+                let message_sender = self.message_sender.clone();
+                let device_name = self.device_name.clone();
+                let connections = self.connections.clone();
+                let device_id_clone = device_id.clone();
+                
+                tokio::spawn(async move {
+                    loop {
+                        // 检查连接是否仍然存在
+                        let has_connection = {
+                            let conns = connections.lock().await;
+                            conns.contains_key(&device_id_clone)
+                        };
+                        
+                        if !has_connection {
+                            break;
+                        }
+                        
+                        // 尝试读取消息
+                        let read_result = {
+                            let mut conns = connections.lock().await;
+                            if let Some(stream) = conns.get_mut(&device_id_clone) {
+                                Self::read_message(stream, message_sender.clone(), device_name.clone()).await
+                            } else {
+                                break;
+                            }
+                        };
+                        
+                        // 如果读取失败，可能是连接断开
+                        if let Err(e) = read_result {
+                            eprintln!("❌ 读取消息失败: {}", e);
+                            // 从连接池中移除连接
+                            connections.lock().await.remove(&device_id_clone);
+                            break;
+                        }
+                        
+                        // 短暂休眠以避免忙等待
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    
+                    println!("📤 断开与 {} 的连接", device_id_clone);
+                });
                 
                 Ok(device_id)
             }
@@ -280,6 +339,9 @@ impl NetworkManager {
         // 向所有连接的设备发送消息
         let mut connections = self.connections.lock().await;
         let mut failed_connections = Vec::new();
+        
+        // 首先检查有多少个连接
+        println!("📊 当前连接数: {}", connections.len());
         
         for (device_id, stream) in connections.iter_mut() {
             match stream.write_all(&send_data).await {
