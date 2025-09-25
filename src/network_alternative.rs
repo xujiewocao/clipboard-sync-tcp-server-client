@@ -190,36 +190,36 @@ impl NetworkManager {
         
         loop {
             // 首先读取消息长度（4字节）
-            let mut len_buf = [0u8; 4];
-            match stream.read_exact(&mut len_buf).await {
-                Ok(_) => {},
+        let mut len_buf = [0u8; 4];
+        match stream.read_exact(&mut len_buf).await {
+            Ok(_) => {},
                 Err(_) => break, // 连接断开
-            }
-            
-            let message_len = u32::from_be_bytes(len_buf) as usize;
-            if message_len > MESSAGE_MAX_SIZE {
+        }
+        
+        let message_len = u32::from_be_bytes(len_buf) as usize;
+        if message_len > MESSAGE_MAX_SIZE {
                 eprintln!("❌ 消息过大: {} bytes", message_len);
                 break;
-            }
-            
-            // 读取消息内容
+        }
+        
+        // 读取消息内容
             buffer.resize(message_len, 0);
-            stream.read_exact(&mut buffer).await?;
-            
-            match ClipboardMessage::from_bytes(&buffer) {
-                Ok(message) => {
-                    println!("📨 收到消息: {} (来自: {})", 
-                             message.content.preview(50), 
-                             message.sender_name);
-                    
-                    // 转发消息给处理器
-                    if let Some(sender) = message_sender.lock().await.as_ref() {
-                        if let Err(e) = sender.send(message) {
-                            eprintln!("❌ 转发消息失败: {}", e);
-                        }
+        stream.read_exact(&mut buffer).await?;
+        
+        match ClipboardMessage::from_bytes(&buffer) {
+            Ok(message) => {
+                println!("📨 收到消息: {} (来自: {})", 
+                         message.content.preview(50), 
+                         message.sender_name);
+                
+                // 转发消息给处理器
+                if let Some(sender) = message_sender.lock().await.as_ref() {
+                    if let Err(e) = sender.send(message) {
+                        eprintln!("❌ 转发消息失败: {}", e);
                     }
                 }
-                Err(e) => {
+            }
+            Err(e) => {
                     eprintln!("❌ 解析消息失败: {}", e);
                 }
             }
