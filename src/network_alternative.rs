@@ -180,30 +180,26 @@ impl NetworkManager {
         Ok(())
     }
 
-    /// 处理TCP连接
-    async fn handle_tcp_connection(
+    /// 从连接中读取消息
+    async fn read_message(
         stream: &mut TokioTcpStream,
         message_sender: Arc<Mutex<Option<mpsc::UnboundedSender<ClipboardMessage>>>>,
-        _device_name: String,
+        device_name: String,
     ) -> Result<()> {
-        let mut buffer = vec![0u8; MESSAGE_MAX_SIZE];
-        
-        loop {
-            // 首先读取消息长度（4字节）
+        // 读取消息长度（4字节）
         let mut len_buf = [0u8; 4];
         match stream.read_exact(&mut len_buf).await {
             Ok(_) => {},
-                Err(_) => break, // 连接断开
+            Err(_) => return Err(anyhow::anyhow!("连接断开")), // 连接断开
         }
         
         let message_len = u32::from_be_bytes(len_buf) as usize;
         if message_len > MESSAGE_MAX_SIZE {
-                eprintln!("❌ 消息过大: {} bytes", message_len);
-                break;
+            return Err(anyhow::anyhow!("消息过大: {} bytes", message_len));
         }
         
         // 读取消息内容
-            buffer.resize(message_len, 0);
+        let mut buffer = vec![0u8; message_len];
         stream.read_exact(&mut buffer).await?;
         
         match ClipboardMessage::from_bytes(&buffer) {
@@ -218,14 +214,12 @@ impl NetworkManager {
                         eprintln!("❌ 转发消息失败: {}", e);
                     }
                 }
+                Ok(())
             }
             Err(e) => {
-                    eprintln!("❌ 解析消息失败: {}", e);
-                }
+                Err(anyhow::anyhow!("解析消息失败: {}", e))
             }
         }
-        
-        Ok(())
     }
 
     /// 连接到指定设备
@@ -244,6 +238,49 @@ impl NetworkManager {
                 
                 // 保存连接
                 self.connections.lock().await.insert(device_id.clone(), stream);
+                
+                // 启动消息接收任务
+                let message_sender = self.message_sender.clone();
+                let device_name = self.device_name.clone();
+                let connections = self.connections.clone();
+                let device_id_clone = device_id.clone();
+                
+                tokio::spawn(async move {
+                    loop {
+                        // 检查连接是否仍然存在
+                        let has_connection = {
+                            let conns = connections.lock().await;
+                            conns.contains_key(&device_id_clone)
+                        };
+                        
+                        if !has_connection {
+                            break;
+                        }
+                        
+                        // 尝试读取消息
+                        let read_result = {
+                            let mut conns = connections.lock().await;
+                            if let Some(stream) = conns.get_mut(&device_id_clone) {
+                                Self::read_message(stream, message_sender.clone(), device_name.clone()).await
+                            } else {
+                                break;
+                            }
+                        };
+                        
+                        // 如果读取失败，可能是连接断开
+                        if let Err(e) = read_result {
+                            eprintln!("❌ 读取消息失败: {}", e);
+                            // 从连接池中移除连接
+                            connections.lock().await.remove(&device_id_clone);
+                            break;
+                        }
+                        
+                        // 短暂休眠以避免忙等待
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    
+                    println!("📤 断开与 {} 的连接", device_id_clone);
+                });
                 
                 Ok(device_id)
             }
