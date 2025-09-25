@@ -134,7 +134,7 @@ impl NetworkManager {
             port,
         )).await?;
         
-        println!("🔄 TCP数据服务器启动在端口 {}", port);
+        println!("🔄 TCP数据服务器启动在端口  {}", port);
         
         let message_sender = self.message_sender.clone();
         let device_name = self.device_name.clone();
