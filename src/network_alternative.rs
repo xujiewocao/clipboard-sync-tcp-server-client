@@ -139,20 +139,39 @@ impl NetworkManager {
         let message_sender = self.message_sender.clone();
         let device_name = self.device_name.clone();
         let is_running = self.is_running.clone();
+        let connections = self.connections.clone();
         
         tokio::spawn(async move {
             while *is_running.lock().await {
                 match listener.accept().await {
-                    Ok((mut stream, addr)) => {
+                    Ok((stream, addr)) => {
                         println!("📥 接受来自 {} 的连接", addr);
                         
                         let message_sender = message_sender.clone();
                         let device_name = device_name.clone();
+                        let connections = connections.clone();
                         
+                        // 为每个连接生成一个唯一标识符
+                        let device_id = format!("client_{}", addr);
+                        
+                        // 将连接保存到服务器的连接池中
+                        connections.lock().await.insert(device_id.clone(), stream);
+                        
+                        // 为每个连接创建一个处理任务
                         tokio::spawn(async move {
+                            // 重新获取stream（从连接池中）
+                            let mut stream = {
+                                let mut conns = connections.lock().await;
+                                conns.remove(&device_id).unwrap() // 安全移除，因为我们刚刚插入了它
+                            };
+                            
                             if let Err(e) = Self::handle_tcp_connection(&mut stream, message_sender, device_name).await {
                                 eprintln!("❌ 处理TCP连接失败: {}", e);
                             }
+                            
+                            // 连接处理完成后，从连接池中移除
+                            connections.lock().await.remove(&device_id);
+                            println!("📤 断开与 {} 的连接", device_id);
                         });
                     }
                     Err(e) => {
@@ -226,7 +245,7 @@ impl NetworkManager {
                 println!("✅ 成功连接到设备 {}:{}", ip, port);
                 
                 // 生成设备标识符
-                let device_id = format!("{}:{}", ip, port);
+                let device_id = format!("server_{}:{}", ip, port);
                 
                 // 保存连接
                 self.connections.lock().await.insert(device_id.clone(), stream);
