@@ -156,23 +156,18 @@ impl NetworkManager {
                         
                         // 将连接保存到服务器的连接池中
                         connections.lock().await.insert(device_id.clone(), stream);
+
+                        println!("✅ 添加与 {} 的连接", device_id);
+                        println!("connections len: {}", connections.lock().await.len());
                         
-                        // 为每个连接创建一个处理任务
-                        tokio::spawn(async move {
-                            // 重新获取stream（从连接池中）
-                            let mut stream = {
-                                let mut conns = connections.lock().await;
-                                conns.remove(&device_id).unwrap() // 安全移除，因为我们刚刚插入了它
-                            };
-                            
-                            if let Err(e) = Self::handle_tcp_connection(&mut stream, message_sender, device_name).await {
-                                eprintln!("❌ 处理TCP连接失败: {}", e);
-                            }
-                            
-                            // 连接处理完成后，从连接池中移除
-                            connections.lock().await.remove(&device_id);
-                            println!("📤 断开与 {} 的连接", device_id);
-                        });
+                        // 从连接池中获取连接的可变引用
+                        if let Some(stream) = connections.lock().await.get_mut(&device_id) {
+                            let _ = Self::handle_tcp_connection(stream, message_sender, device_name).await;
+                        }
+                        
+                        // 删除连接
+                        connections.lock().await.remove(&device_id);
+                        println!("📤 断开与 {} 的连接", addr);
                     }
                     Err(e) => {
                         eprintln!("❌ 接受连接失败: {}", e);
@@ -280,7 +275,7 @@ impl NetworkManager {
         // 向所有连接的设备发送消息
         let mut connections = self.connections.lock().await;
         let mut failed_connections = Vec::new();
-        
+        println!("connections len: {}", connections.len());
         for (device_id, stream) in connections.iter_mut() {
             match stream.write_all(&send_data).await {
                 Ok(_) => {
